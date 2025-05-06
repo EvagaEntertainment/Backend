@@ -504,11 +504,11 @@ const getOnepackage = async (req, res) => {
     }
 
     if (!packageDetails.values || !(packageDetails.values instanceof Map)) {
-      packageDetails.values = new Map(); // Ensure it's a Map object
+      packageDetails.values = new Map();
     }
 
-    // Fetch category fee from categoryfees modal
-    let categoryFee = 12; // Default 12% increase
+    // Fetch category fee
+    let categoryFee = 12;
     const categoryFeeData = await CategoryFee.findOne({
       categoryId: verifiedService.Category,
     }).select("feesPercentage");
@@ -517,35 +517,54 @@ const getOnepackage = async (req, res) => {
       categoryFee = categoryFeeData.feesPercentage;
     }
 
-    // Function to apply percentage increase
-    const applyIncrease = (value, key) => {
-      if (!value || isNaN(value)) {
-        return value;
+    // Check for active coupons
+    const currentDate = new Date();
+    const coupon = await Coupon.findOne({
+      selectedpackage: packageid,
+      startDate: { $lte: currentDate },
+      endDate: { $gte: currentDate },
+    });
+
+    const discountPercentage = coupon?.discountPercentage || 0;
+
+    // Enhanced price cleaning and adjustment function
+    const applyPriceAdjustments = (value) => {
+      if (value === null || value === undefined) return value;
+      
+      // Remove all non-numeric characters except digits and decimal points
+      const cleanedValue = String(value).replace(/[^\d.]/g, '');
+      const numericValue = parseFloat(cleanedValue);
+
+      if (isNaN(numericValue)) return 0; // Return 0 for invalid numbers
+
+      // Apply category fee
+      let adjustedValue = numericValue * (1 + categoryFee / 100);
+      
+      // Apply discount if applicable
+      if (discountPercentage > 0) {
+        adjustedValue *= (1 - discountPercentage / 100);
       }
-      const updatedValue = (
-        parseFloat(value) *
-        (1 + categoryFee / 100)
-      ).toFixed(2);
-      return updatedValue;
+      
+      return adjustedValue.toFixed(2);
     };
 
-    // Function to update array-based values
-    const updateArray = (key, fieldName) => {
+    // Function to update and sort array-based values
+    const updateAndSortArray = (key, fieldName) => {
       if (packageDetails.values.has(key)) {
         const updatedArray = packageDetails.values
           .get(key)
-          ?.map((item, index) => ({
+          ?.map((item) => ({
             ...item,
-            [fieldName]: applyIncrease(
-              item[fieldName],
-              `${key}[${index}].${fieldName}`
-            ),
-          }));
+            [fieldName]: applyPriceAdjustments(item[fieldName]),
+          }))
+          // Sort the array by the price field in ascending order
+          .sort((a, b) => parseFloat(a[fieldName]) - parseFloat(b[fieldName]));
+        
         packageDetails.values.set(key, updatedArray);
       }
     };
 
-    // Define the fields that need updates and their respective numeric keys
+    // Fields to process
     const fieldsToUpdate = {
       Package: "Rates",
       "OrderQuantity&Pricing": "Rates",
@@ -556,28 +575,27 @@ const getOnepackage = async (req, res) => {
       AddOns: "Rates",
     };
 
-    // Dynamically update only the fields that exist in packageDetails.values
+    // Process array fields with sorting
     Object.keys(fieldsToUpdate).forEach((key) => {
       if (packageDetails.values.has(key)) {
-        updateArray(key, fieldsToUpdate[key]);
+        updateAndSortArray(key, fieldsToUpdate[key]);
       }
     });
 
-    // Update individual price keys
+    // Process individual price fields
     const priceKeys = ["Price", "price", "Pricing"];
     priceKeys.forEach((key) => {
       if (packageDetails.values.has(key)) {
         packageDetails.values.set(
           key,
-          applyIncrease(packageDetails.values.get(key), key)
+          applyPriceAdjustments(packageDetails.values.get(key))
         );
       }
     });
 
-    // Assign updated package back to service
     verifiedService.services = [packageDetails];
 
-    // Fetch vendor and category details
+    // Fetch related data
     const getVendorDetails = await Vender.findById(
       verifiedService?.vendorId
     ).select("userName bio -_id");
@@ -585,12 +603,23 @@ const getOnepackage = async (req, res) => {
       "name -_id"
     );
 
-    res.status(200).json({
-      message: "Package updated successfully",
+    // Prepare response
+    const response = {
+      message: "Package details fetched successfully",
       data: verifiedService,
       getVendorDetails: getVendorDetails,
       category: category,
-    });
+    };
+
+    if (coupon) {
+      response.coupon = {
+        code: coupon.code,
+        discountPercentage: coupon.discountPercentage,
+        validUntil: coupon.endDate,
+      };
+    }
+
+    res.status(200).json(response);
   } catch (error) {
     res.status(500).json({
       message: "Failed to fetch package details",
